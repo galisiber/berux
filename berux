@@ -1,0 +1,268 @@
+#!/usr/bin/env python3
+
+import requests, argparse, os, random,re, time, sys, concurrent.futures, threading, warnings
+from urllib.parse import urlparse
+from bs4 import BeautifulSoup
+from requests.packages.urllib3.exceptions import InsecureRequestWarning
+warnings.simplefilter('ignore', InsecureRequestWarning)
+
+checkedFirstSegment = []
+checked = []
+bigList = []
+default = {
+    'retries':3,
+    'threads':1,
+    'verbose':0,
+    'clean':0
+}
+lock = threading.Lock()
+script_name = os.path.basename(__file__)
+banner_berux = '''
+    __                         
+   / /_  ___  _______  ___  __
+  / __ \\/ _ \\/ ___/ / / / |/_/
+ / /_/ /  __/ /  / /_/ />  <  
+/_.___/\\___/_/   \\__,_/_/|_|  v.1.0.0
+
+                            @gtx666ti
+                            '''
+
+def sortUrls(urls):
+    sorted_urls = sorted(urls)
+    return sorted_urls
+
+def printRed(text):
+    bg_red = "\033[41m"
+    text_white = "\033[37m"
+    reset = "\033[0m"
+    return(f"{bg_red}{text_white}{text}{reset}")
+
+def printGreen(text):
+    bg_green = "\033[42m"
+    text_black = "\033[30m"
+    reset = "\033[0m"
+    return(f"{bg_green}{text_black}{text}{reset}")
+
+def printBlue(text):
+    bg_blue = "\033[44m"
+    text_white = "\033[37m"
+    reset = "\033[0m"
+    return(f"{bg_blue}{text_white}{text}{reset}")
+
+def printOrange(text):
+    bg_orange = "\033[48;5;214m"  # Light orange background (ANSI color code)
+    text_black = "\033[30m"       # Black text
+    reset = "\033[0m"             # Reset to default colors
+    return f"{bg_orange}{text_black}{text}{reset}"
+
+def info(text):
+    output = '{} {}'.format(printBlue('[INFO]'), text)
+    print(output)
+
+def critical(text):
+    output = '{} {}'.format(printRed('[CRITICAL]'), text)
+    print(output)
+
+def warning(text):
+    output = '{} {}'.format(printOrange('[WARNING]'), text)
+    print(output)
+
+def found(text, type, verbose = 0):
+    if verbose:
+        output = '{} {}'.format(printGreen('[{}]'.format(type.upper())), text)
+    else:
+        output = text
+    print(output)
+
+def userAgent():
+    user_agents = [
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.1.1 Safari/605.1.15",
+        "Mozilla/5.0 (Linux; Android 11; Pixel 4 XL Build/RKQ1.200826.002) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.114 Mobile Safari/537.36",
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0 Mobile/15E148 Safari/604.1",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Gecko/20100101 Firefox/89.0",
+    ]
+    return random.choice(user_agents)
+
+def getUrlExt(url):
+    parsed_url = urlparse(url)
+    path = parsed_url.path
+    _, ext = os.path.splitext(path)
+    return ext
+def ensureSlash(url):
+    if not url.startswith(('http://', 'https://')):
+        url = 'https://' + url
+    if getUrlExt(url):
+        return url
+    if url.endswith('/'):
+        return url
+    elif url.endswith('#'):
+        return url.replace('#', '')
+    else:
+        return url + '/'
+
+def removeDuplicate(urls):
+    unique_urls = set(urls)
+    return list(unique_urls)
+
+def makeRequest(url):
+    global default
+    for i in range(default['retries']):
+        try:
+            headers = {
+                'User-Agent': userAgent()
+            }
+            res = requests.get(url, headers=headers, allow_redirects=True, timeout=3, verify=False)
+            return res.text
+        except:
+            warning('Can\'t connect to {}.'.format(url))
+            if i < default['retries'] - 1:
+                info("Retrying...")
+                time.sleep(1)
+            else:
+                warning("Max retries exceeded. Could not retrieve the URL.")
+                return None
+            
+def extractFirstSegment(url):
+    pattern = r'https?://[^/]+/([^/]+)'
+    match = re.search(pattern, url)
+    if match:
+        return match.group(1)
+    return None
+
+def clean(urls):
+    checked = []
+    output = []
+    for i in range(len(urls)):
+        firstSegment = extractFirstSegment(urls[i])
+        if firstSegment in checked:
+            continue
+        if firstSegment:
+            checked.append(firstSegment)
+        if 'javascript:void(0)' in urls[i]:
+            continue
+        elif '/#' in urls[i]:
+            continue
+        output.append(re.sub(r'(?<!:)//+', '/', urls[i]))
+    return output
+
+def process(url):
+    global checked, checkedFirstSegment, bigList, default
+    with lock:
+        checked.append(url)
+    url = ensureSlash(url)
+    info('Scrapping URLs from {}'.format(url))
+    html = makeRequest(url)
+    links = getLinks(url, html)
+    futures = []
+    try:
+        for link in links:
+            if baseUrl(link) != baseUrl(url):
+                continue
+            found(link, 'url', default['verbose'])
+            firstSegment = extractFirstSegment(link)
+            with lock:
+                if default['clean'] == 0:
+                    bigList.append(link)
+                    futures.append(link)
+                else:
+                    if link not in checked and firstSegment not in checkedFirstSegment:
+                        checkedFirstSegment.append(firstSegment)
+                        bigList.append(link)
+                        futures.append(link)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=default['threads']) as executor:
+            for link in futures:
+                executor.submit(process)
+    except:
+        pass
+
+def baseUrl(url):
+    parsed_url = urlparse(url)
+    base_url = f"{parsed_url.scheme}://{parsed_url.netloc}/"
+    return base_url
+def getLinks(url, html):
+    try:
+        url_base = baseUrl(url)
+        output = []
+        soup = BeautifulSoup(html, 'html.parser')
+        for a_tag in soup.find_all('a', href=True):
+            if url in a_tag.get('href'):
+                url_href = a_tag.get('href')
+            elif '://' in a_tag.get('href'):
+                if url in a_tag.get('href'):
+                    url_href = a_tag.get('href')
+                else:
+                    pass
+            else:
+                url_href = url_base + a_tag.get('href')
+            output.append(url_href)
+        for form_action in soup.find_all('form', action=True):
+            if url in form_action.get('href'):
+                url_href = form_action.get('href')
+            elif '://' in form_action.get('href'):
+                if url in form_action.get('href'):
+                    url_href = form_action.get('href')
+                else:
+                    pass
+            else:
+                url_href = url_base + form_action.get('href')
+            output.append(url_href)
+        output = clean(sortUrls(removeDuplicate(output)))
+        return output
+    except:
+        pass
+
+def main():
+    banner()
+    parser = argparse.ArgumentParser(
+        usage=f'{script_name} [flags]',
+        description="Berux is a fast parameters/endpoints scrapper tool for SQLI, XSS, RCE, etc"
+    )
+    parser.add_argument('-u', '--url', type=str, help='target URLs/hosts to scan')
+    parser.add_argument('-l', '--list', type=str, help='path to file containing a list of target URLs/hosts to scan (one per line)')
+    parser.add_argument('-o', '--output', type=str, help='output file to write found issues')
+    parser.add_argument('-r', '--retries', type=int, help='retries of each request (if could not retrieve the URL)')
+    parser.add_argument('-v', '--verbose', type=int, help='display more information (0 = False, 1 = True) (default: 0)')
+    parser.add_argument('-t', '--threads', type=int, help='number of worker threads (default: 1)')
+    parser.add_argument('-c', '--clean', type=int, help='remove duplicate result (0 = False, 1 = True) (default: 0)')
+    args = parser.parse_args()
+    if not (args.url or args.list or args.output):
+        parser.print_help()
+        sys.exit(1)
+    if args.threads:
+        if int(args.threads) > 10:
+            warning('Max threads is 10. Setting threads number to 10')
+            default['threads']  = 10
+        else:
+            default['threads']  = int(args.threads)
+    if args.clean == 1:
+        default['clean']    = int(args.clean)
+    if args.verbose == 1:
+        default['verbose']  = int(args.verbose)
+    if args.retries:
+        default['retries']  = int(args.retries)
+    if args.url:
+        process(args.url)
+    if args.list:
+        f = open(args.list, 'r')
+        futures = []
+        for url in f.read().split('\n'):
+            with lock:
+                futures.append(url)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=default['threads']) as executor:
+            for link in futures:
+                executor.submit(process, link)
+            #process(url)
+    if args.output:
+        f = open(args.output, 'w')
+        if default['clean'] == 0:
+            f.write('\n'.join(bigList))
+        else:
+            f.write('\n'.join(removeDuplicate(bigList)))
+        f.close()
+
+def banner():
+    print(banner_berux)
+
+if __name__ == "__main__":
+    main()
